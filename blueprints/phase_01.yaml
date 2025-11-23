@@ -1,0 +1,32 @@
+phase_id: 1
+name: "The Village"
+goal: "Prove the model with manual CEO labor + simple booking."
+stack: "Next.js (Vercel), Go (Fly.io), Postgres (Neon)"
+
+data_models:
+  - name: User
+    fields:
+      - id (UUID)
+      - email (String)
+      - role (Enum: OWNER, CUSTOMER)
+  - name: Booking
+    fields:
+      - id (UUID)
+      - customer_id (FK)
+      - scheduled_time (Timestamp)
+      - status (Enum: PENDING, COMPLETED)
+
+structure:
+  - cmd/server
+  - internal/domain/booking
+  - internal/domain/user
+  - internal/database/migrations
+  - web/app
+
+files:
+  - path: internal/domain/booking/service.go
+    description: "Core logic for creating a booking. No complex rules yet."
+    content: |
+      package booking
+      // CreateBooking handles the MVP booking flow
+      func CreateBooking(...) error { return nil }
