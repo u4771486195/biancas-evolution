@@ -1,0 +1,151 @@
+name: "Build Phase 01: The Village"
+
+on:
+  workflow_dispatch: # Allows you to run this manually from the "Actions" tab
+
+permissions:
+  contents: write
+
+jobs:
+  scaffold-phase-01:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: define-architecture
+        run: |
+          # --- CONFIGURATION ---
+          TARGET_DIR="Phase_01"
+          
+          # 1. Clean previous run to ensure a fresh start
+          rm -rf $TARGET_DIR
+          mkdir -p $TARGET_DIR
+
+          # --- FOLDER STRUCTURE ---
+          # The Monolith Layout (Go Standard Layout + Next.js)
+          
+          # Backend (Go)
+          mkdir -p $TARGET_DIR/backend/cmd/api
+          mkdir -p $TARGET_DIR/backend/internal/domain/booking
+          mkdir -p $TARGET_DIR/backend/internal/domain/user
+          mkdir -p $TARGET_DIR/backend/internal/adapter/storage/postgres
+          mkdir -p $TARGET_DIR/backend/internal/adapter/handler/http
+          
+          # Frontend (Next.js App Router)
+          mkdir -p $TARGET_DIR/frontend/app/booking
+          mkdir -p $TARGET_DIR/frontend/app/dashboard
+          mkdir -p $TARGET_DIR/frontend/components/ui
+          
+          # Infrastructure & Config
+          mkdir -p $TARGET_DIR/database/migrations
+          mkdir -p $TARGET_DIR/infrastructure/local
+
+      - name: generate-files
+        run: |
+          TARGET_DIR="Phase_01"
+
+          # --- README ---
+          cat <<EOF > $TARGET_DIR/README.md
+          # Phase 01: The Village (0 - 100 Workers)
+          
+          **Goal:** Prove the business model. The CEO performs the cleaning.
+          **Constraint:** 0 kr/mo costs.
+          
+          ## Tech Stack
+          - **Frontend:** Next.js (Deployed on Vercel Hobby)
+          - **Backend:** Go Monolith (Deployed on Fly.io Free / DigitalOcean App)
+          - **Database:** PostgreSQL (Supabase Free Tier)
+          
+          ## Architecture
+          At this stage, we use a **Modular Monolith**.
+          - We do NOT use Microservices yet.
+          - We do NOT use Kafka yet.
+          - We focus on **Data Integrity** (SQL Schemas) to prepare for the future.
+          EOF
+
+          # --- DATABASE SCHEMA (The Foundation) ---
+          # This prevents the "Two Table Trap" by using UUIDs and Enums early.
+          cat <<EOF > $TARGET_DIR/database/migrations/001_initial_schema.sql
+          -- Phase 1 Schema
+          
+          CREATE TYPE user_role AS ENUM ('owner', 'customer', 'worker');
+          CREATE TYPE job_status AS ENUM ('pending', 'scheduled', 'completed', 'cancelled');
+
+          CREATE TABLE users (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              email VARCHAR(255) UNIQUE NOT NULL,
+              phone_number VARCHAR(50),
+              role user_role NOT NULL DEFAULT 'customer',
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+
+          CREATE TABLE jobs (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              customer_id UUID NOT NULL REFERENCES users(id),
+              worker_id UUID REFERENCES users(id), -- Nullable for now (CEO picks it up)
+              
+              -- Location Data (Will evolve into PostGIS later)
+              address_line_1 TEXT NOT NULL,
+              city VARCHAR(100) NOT NULL DEFAULT 'Stockholm',
+              
+              -- Scheduling
+              scheduled_time TIMESTAMP WITH TIME ZONE NOT NULL,
+              estimated_duration_minutes INT DEFAULT 120,
+              
+              status job_status DEFAULT 'pending',
+              price_amount DECIMAL(10, 2), -- Storing price directly for MVP
+              price_currency VARCHAR(3) DEFAULT 'SEK',
+              
+              created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+          );
+          
+          -- Simple index for the CEO's dashboard
+          CREATE INDEX idx_jobs_scheduled_time ON jobs(scheduled_time);
+          EOF
+
+          # --- BACKEND ENTRY POINT ---
+          cat <<EOF > $TARGET_DIR/backend/cmd/api/main.go
+          package main
+
+          import (
+              "fmt"
+              "log"
+              "net/http"
+              "os"
+          )
+
+          func main() {
+              port := os.Getenv("PORT")
+              if port == "" {
+                  port = "8080"
+              }
+
+              fmt.Printf("🚀 Project Bianca (Phase 1) starting on port %s...\n", port)
+              
+              // Simple Health Check
+              http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+                  w.WriteHeader(http.StatusOK)
+                  w.Write([]byte("OK - The Village is Alive"))
+              })
+
+              log.Fatal(http.ListenAndServe(":"+port, nil))
+          }
+          EOF
+
+          # --- GO MODULE DEFINITION ---
+          cat <<EOF > $TARGET_DIR/backend/go.mod
+          module github.com/your-org/project-bianca
+
+          go 1.21
+          EOF
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "Architecture Bot"
+          git config --global user.email "bot@bianca.ai"
+          
+          git add Phase_01/
+          
+          # Only commit if there are changes to avoid empty commit errors
+          git diff --quiet && git diff --staged --quiet || (git commit -m "🏗️ Built Phase 01 Scaffold: The Village" && git push)
