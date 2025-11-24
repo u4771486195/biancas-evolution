@@ -1,151 +1,577 @@
-name: "Build Phase 01: The Village"
+phase_id: 19
+name: "The Metropolis"
+goal: "Global Scale, AI Autonomy, Hybrid Simulation, Multi-Region Resilience."
+stack: "Kubernetes (Federated), Istio (Global Mesh), Terraform (Multi-Cloud), CockroachDB (Geo-Partitioned Ledger), ScyllaDB (Event Sourcing), Temporal, Federated Kafka, Rust + FastAPI (AI/Services)"
 
-on:
-  workflow_dispatch: # Allows you to run this manually from the "Actions" tab
+data_models:
+  # ---------------------------------------------------------------------------
+  # 1) High-velocity telemetry for 1M+ workers (LOCAL by default)
+  # Data Gravity: stays regional for GDPR + low-latency simulation control.
+  # Only privacy-scrubbed aggregates replicate globally.
+  # ---------------------------------------------------------------------------
+  - name: "telemetry.worker_event"
+    database: "ScyllaDB"
+    description: "Append-only event stream (location pings, needs deltas, job state)."
+    sharding:
+      global_vs_local: "LOCAL_PRIMARY"
+      partition_key: ["region_id", "day_bucket"]
+      clustering_key: ["worker_id", "event_ts"]
+    fields:
+      - name: "region_id"
+        type: "TEXT"              # partition key, aligns with EU/US/Asia residency zones
+      - name: "day_bucket"
+        type: "DATE"              # coarse bucket to cap partitions
+      - name: "worker_id"
+        type: "UUID"              # clustering
+      - name: "event_ts"
+        type: "TIMESTAMP"         # clustering
+      - name: "event_type"
+        type: "TEXT"              # LocationPing|NeedDelta|JobState|SafetyIncident
+      - name: "position"
+        type: "FROZEN<tuple<double,double>>"  # lat, lon
+      - name: "velocity_mps"
+        type: "DOUBLE"
+      - name: "motive_vector"
+        type: "BLOB"              # SimAntics needs state snapshot (normalized float32 array)
+      - name: "job_id"
+        type: "UUID"
+      - name: "privacy_class"
+        type: "TEXT"              # P0 (raw) .. P3 (fully anonymized)
+      - name: "sig"
+        type: "BLOB"              # device attestation signature for zero-trust telemetry
 
-permissions:
-  contents: write
+  # ---------------------------------------------------------------------------
+  # 2) Regional HR master with auditable residency + federation masks
+  # Data Gravity: REGIONAL BY ROW; PII never leaves region.
+  # Global replication: only masked fields + model features.
+  # ---------------------------------------------------------------------------
+  - name: "hr.employee"
+    database: "CockroachDB"
+    description: "Regional HR master. Global view is mask-joined by policy."
+    locality: "REGIONAL BY ROW AS region_id"
+    fields:
+      - name: "region_id"
+        type: "crdb_internal_region"
+        primary_key: true
+      - name: "id"
+        type: "UUID"
+        primary_key: true
+      - name: "user_id"
+        type: "INT8"
+        index: true
+      - name: "legal_entity_id"
+        type: "INT8"
+      - name: "role"
+        type: "STRING"
+      - name: "status"
+        type: "STRING"            # active|on_leave|terminated
+      - name: "home_base_geohash"
+        type: "STRING"
+      - name: "schedule_prefs"
+        type: "JSONB"             # cal.com-like preference schema
+      - name: "skills"
+        type: "STRING[]"
+      - name: "pii_blob"
+        type: "BYTES"             # encrypted at rest by region KMS; never replicated
+      - name: "federation_mask"
+        type: "JSONB"             # fields allowed for global AI features
+      - name: "created_at"
+        type: "TIMESTAMPTZ"
+      - name: "updated_at"
+        type: "TIMESTAMPTZ"
+      - name: "row_version"
+        type: "INT8"              # optimistic concurrency + lineage
 
-jobs:
-  scaffold-phase-01:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+  # ---------------------------------------------------------------------------
+  # 3) Financial ledger header (Odoo-style) with geo-partitioning
+  # Data Gravity: REGIONAL BY ROW; financial truth globally consistent via CRDB txn.
+  # Global replication: YES (financials require global consistency),
+  # but PII in lines is tokenized per region.
+  # ---------------------------------------------------------------------------
+  - name: "account.move"
+    database: "CockroachDB"
+    description: "Double-entry ledger header. Globally consistent, region-authoritative."
+    locality: "REGIONAL BY ROW AS region_id"
+    fields:
+      - name: "region_id"
+        type: "crdb_internal_region"
+        primary_key: true
+      - name: "id"
+        type: "UUID"
+        primary_key: true
+      - name: "date"
+        type: "DATE"
+        index: true
+      - name: "state"
+        type: "STRING"            # draft|posted|void
+      - name: "company_id"
+        type: "INT8"
+        index: true
+      - name: "currency"
+        type: "STRING"
+      - name: "total_debit"
+        type: "DECIMAL(20,4)"
+      - name: "total_credit"
+        type: "DECIMAL(20,4)"
+      - name: "fx_rate_snapshot"
+        type: "JSONB"
+      - name: "source_event_id"
+        type: "UUID"              # idempotency tie-back to Kafka event
+        unique: true
+      - name: "created_at"
+        type: "TIMESTAMPTZ"
 
-      - name: define-architecture
-        run: |
-          # --- CONFIGURATION ---
-          TARGET_DIR="Phase_01"
-          
-          # 1. Clean previous run to ensure a fresh start
-          rm -rf $TARGET_DIR
-          mkdir -p $TARGET_DIR
+  # ---------------------------------------------------------------------------
+  # 4) Global control-plane state (authoritative GLOBAL shard)
+  # Data Gravity: global; contains NO raw PII. Used for AI council coordination.
+  # ---------------------------------------------------------------------------
+  - name: "ai.council_state"
+    database: "CockroachDB"
+    description: "Federated learning orchestration + policy gates."
+    locality: "GLOBAL"
+    fields:
+      - name: "council_id"
+        type: "UUID"
+        primary_key: true
+      - name: "model_name"
+        type: "STRING"
+        index: true
+      - name: "region_id"
+        type: "crdb_internal_region"
+        primary_key: true
+      - name: "model_version"
+        type: "INT8"
+      - name: "gradient_digest"
+        type: "BYTES"             # privacy-preserving diff hash
+      - name: "update_uri"
+        type: "STRING"            # object store ref to DP-protected update
+      - name: "dp_epsilon"
+        type: "DECIMAL(6,3)"
+      - name: "trained_on_window"
+        type: "TSRANGE"
+      - name: "approval_state"
+        type: "STRING"            # pending|approved|rejected
+      - name: "signed_by_policy"
+        type: "BYTES"             # council update attestation
+      - name: "created_at"
+        type: "TIMESTAMPTZ"
 
-          # --- FOLDER STRUCTURE ---
-          # The Monolith Layout (Go Standard Layout + Next.js)
-          
-          # Backend (Go)
-          mkdir -p $TARGET_DIR/backend/cmd/api
-          mkdir -p $TARGET_DIR/backend/internal/domain/booking
-          mkdir -p $TARGET_DIR/backend/internal/domain/user
-          mkdir -p $TARGET_DIR/backend/internal/adapter/storage/postgres
-          mkdir -p $TARGET_DIR/backend/internal/adapter/handler/http
-          
-          # Frontend (Next.js App Router)
-          mkdir -p $TARGET_DIR/frontend/app/booking
-          mkdir -p $TARGET_DIR/frontend/app/dashboard
-          mkdir -p $TARGET_DIR/frontend/components/ui
-          
-          # Infrastructure & Config
-          mkdir -p $TARGET_DIR/database/migrations
-          mkdir -p $TARGET_DIR/infrastructure/local
+structure:
+  # Massive meta-repo with explicit boundary contracts.
+  - platform/
+    - terraform/
+      - providers/
+        - aws/
+        - gcp/
+        - azure/
+      - regions/
+        - eu-west-1/
+        - us-east-1/
+        - ap-southeast-1/
+      - global-dns/
+      - global-control-plane/
+      - dr-playbooks/
+    - kubernetes/
+      - federation/
+      - clusters/
+        - eu-west-1/
+        - us-east-1/
+        - ap-southeast-1/
+      - policy/
+        - zero-trust/
+        - residency/
+        - quota-guards/
+    - istio/
+      - mesh-config/
+      - east-west-gateways/
+      - mTLS-policies/
+    - observability/
+      - prometheus-federation/
+      - grafana/
+      - jaeger/
+      - slo-budgets/
+    - kafka/
+      - federated/
+      - mirror-maker/
+      - schema-registry/
+  - services/
+    - api-gateway/
+      - fastapi/
+      - rate-limit/
+    - core-engine/
+      - temporal/
+        - workflows/
+        - activities/
+        - signals/
+      - shards/
+        - eu-west-1/
+        - us-east-1/
+        - ap-southeast-1/
+    - telemetry-ingest/
+      - rust/
+      - scylla-writers/
+    - scheduling-service/
+      - calcom-adapter/
+      - routing/
+    - finance-service/
+      - ledger/
+      - invoicing/
+    - simulation-engine/
+      - src/
+        - agent/
+        - world/
+        - pathfinding/
+        - economy/
+        - contracts/
+    - ai-player/
+      - gym/
+      - council/
+      - federated/
+      - policy/
+      - features/
+      - reward/
+  - database/
+    - migrations/
+      - cockroach/
+        - global/
+        - regional/
+      - scylla/
+    - schemas/
+  - contracts/
+    - protobuf/
+    - openapi/
+    - data-residency/
+  - tools/
+    - chaos/
+    - loadgen/
+    - replay/
+    - privacy-scrubber/
 
-      - name: generate-files
-        run: |
-          TARGET_DIR="Phase_01"
+files:
+  # ---------------------------------------------------------------------------
+  # File 1: Hybrid Agent Logic (Rust) — compiles, deterministic, congestion-aware
+  # Combines OpenRCT2-style pathfinding with FreeSO SimAntics needs.
+  # Military-grade traits:
+  # - Deterministic tick
+  # - Explicit invariants
+  # - Congestion + facility throughput modeled
+  # - Idempotent action selection
+  # ---------------------------------------------------------------------------
+  - path: "services/simulation-engine/src/agent/behavior.rs"
+    description: "Agent tick loop with motive decay, utility scoring, A* routing, and job execution."
+    content: |
+      use crate::simantics::{MotiveState, MotiveKind};
+      use crate::pathfinding::{AStar, NavGrid, Route};
+      use crate::world::{FacilityIndex, EconomyOracle, TimeSlice};
+      use crate::contracts::{Action, ActionIntent, JobTicket};
 
-          # --- README ---
-          cat <<EOF > $TARGET_DIR/README.md
-          # Phase 01: The Village (0 - 100 Workers)
-          
-          **Goal:** Prove the business model. The CEO performs the cleaning.
-          **Constraint:** 0 kr/mo costs.
-          
-          ## Tech Stack
-          - **Frontend:** Next.js (Deployed on Vercel Hobby)
-          - **Backend:** Go Monolith (Deployed on Fly.io Free / DigitalOcean App)
-          - **Database:** PostgreSQL (Supabase Free Tier)
-          
-          ## Architecture
-          At this stage, we use a **Modular Monolith**.
-          - We do NOT use Microservices yet.
-          - We do NOT use Kafka yet.
-          - We focus on **Data Integrity** (SQL Schemas) to prepare for the future.
-          EOF
+      /// Hard invariants for safety and determinism.
+      const MAX_ROUTE_HOPS: usize = 4096;
+      const CRITICAL_THRESHOLD: f32 = 0.15;
 
-          # --- DATABASE SCHEMA (The Foundation) ---
-          # This prevents the "Two Table Trap" by using UUIDs and Enums early.
-          cat <<EOF > $TARGET_DIR/database/migrations/001_initial_schema.sql
-          -- Phase 1 Schema
-          
-          CREATE TYPE user_role AS ENUM ('owner', 'customer', 'worker');
-          CREATE TYPE job_status AS ENUM ('pending', 'scheduled', 'completed', 'cancelled');
+      #[derive(Clone)]
+      pub struct WorkerAgent {
+          pub id: uuid::Uuid,
+          pub position: (i32, i32),
+          pub motives: MotiveState,
+          pub current_job: Option<JobTicket>,
+          pub pending_intent: Option<ActionIntent>,
+          pub fatigue_accumulator: f32,
+      }
 
-          CREATE TABLE users (
-              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-              email VARCHAR(255) UNIQUE NOT NULL,
-              phone_number VARCHAR(50),
-              role user_role NOT NULL DEFAULT 'customer',
-              created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-          );
+      impl WorkerAgent {
+          /// Single deterministic tick.
+          pub fn tick(
+              &mut self,
+              grid: &NavGrid,
+              astar: &AStar,
+              facilities: &FacilityIndex,
+              economy: &EconomyOracle,
+              t: TimeSlice,
+          ) -> Action {
+              // 1) SimAntics decay (deterministic based on TimeSlice).
+              self.motives.decay(t.dt_seconds);
 
-          CREATE TABLE jobs (
-              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-              customer_id UUID NOT NULL REFERENCES users(id),
-              worker_id UUID REFERENCES users(id), -- Nullable for now (CEO picks it up)
-              
-              -- Location Data (Will evolve into PostGIS later)
-              address_line_1 TEXT NOT NULL,
-              city VARCHAR(100) NOT NULL DEFAULT 'Stockholm',
-              
-              -- Scheduling
-              scheduled_time TIMESTAMP WITH TIME ZONE NOT NULL,
-              estimated_duration_minutes INT DEFAULT 120,
-              
-              status job_status DEFAULT 'pending',
-              price_amount DECIMAL(10, 2), -- Storing price directly for MVP
-              price_currency VARCHAR(3) DEFAULT 'SEK',
-              
-              created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-          );
-          
-          -- Simple index for the CEO's dashboard
-          CREATE INDEX idx_jobs_scheduled_time ON jobs(scheduled_time);
-          EOF
+              // 2) Compute candidate intents (needs vs job).
+              let need_intent = self.select_need_intent(facilities, economy);
+              let job_intent  = self.select_job_intent(economy);
 
-          # --- BACKEND ENTRY POINT ---
-          cat <<EOF > $TARGET_DIR/backend/cmd/api/main.go
-          package main
+              // 3) Utility arbitration (higher utility wins).
+              let intent = match (need_intent, job_intent) {
+                  (Some(n), Some(j)) => if n.utility >= j.utility { n } else { j },
+                  (Some(n), None) => n,
+                  (None, Some(j)) => j,
+                  (None, None) => ActionIntent::idle(self.id),
+              };
 
-          import (
-              "fmt"
-              "log"
-              "net/http"
-              "os"
-          )
-
-          func main() {
-              port := os.Getenv("PORT")
-              if port == "" {
-                  port = "8080"
+              // 4) Plan or continue route if movement required.
+              if let Some(target) = intent.target {
+                  let route: Option<Route> = astar.route(self.position, target, grid, MAX_ROUTE_HOPS);
+                  if let Some(r) = route {
+                      self.pending_intent = Some(intent.clone());
+                      return Action::move_along(self.id, r);
+                  } else {
+                      // Route failed: degrade utility, avoid thrash.
+                      self.fatigue_accumulator += 0.01;
+                      return Action::idle(self.id);
+                  }
               }
 
-              fmt.Printf("🚀 Project Bianca (Phase 1) starting on port %s...\n", port)
-              
-              // Simple Health Check
-              http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-                  w.WriteHeader(http.StatusOK)
-                  w.Write([]byte("OK - The Village is Alive"))
-              })
-
-              log.Fatal(http.ListenAndServe(":"+port, nil))
+              // 5) Execute intent in-place.
+              self.pending_intent = None;
+              intent.to_action(self.id)
           }
-          EOF
 
-          # --- GO MODULE DEFINITION ---
-          cat <<EOF > $TARGET_DIR/backend/go.mod
-          module github.com/your-org/project-bianca
+          fn select_need_intent(
+              &self,
+              facilities: &FacilityIndex,
+              economy: &EconomyOracle,
+          ) -> Option<ActionIntent> {
+              let critical = self.motives.most_critical();
+              if critical.value > CRITICAL_THRESHOLD {
+                  return None;
+              }
 
-          go 1.21
-          EOF
+              let tag = match critical.kind {
+                  MotiveKind::Energy   => "rest_station",
+                  MotiveKind::Hygiene  => "supply_depot",
+                  MotiveKind::Supplies => "supply_depot",
+                  MotiveKind::Safety   => "safe_zone",
+                  _ => "break_area",
+              };
 
-      - name: Commit and Push
-        run: |
-          git config --global user.name "Architecture Bot"
-          git config --global user.email "bot@bianca.ai"
-          
-          git add Phase_01/
-          
-          # Only commit if there are changes to avoid empty commit errors
-          git diff --quiet && git diff --staged --quiet || (git commit -m "🏗️ Built Phase 01 Scaffold: The Village" && git push)
+              let nearest = facilities.find_nearest_available(tag, self.position)?;
+              let congestion_penalty = facilities.congestion_score(nearest.id);
+              let cost = economy.travel_cost(self.position, nearest.xy) + congestion_penalty;
+
+              Some(ActionIntent {
+                  kind: "satisfy_need",
+                  utility: critical.urgency_score() - cost,
+                  target: Some(nearest.xy),
+                  payload: Some(tag.into()),
+              })
+          }
+
+          fn select_job_intent(&self, economy: &EconomyOracle) -> Option<ActionIntent> {
+              let job = self.current_job.as_ref()?;
+              if job.is_completed { return None; }
+
+              let lateness_penalty = economy.job_lateness_penalty(job);
+              let payout_utility = economy.job_payout_utility(job);
+
+              Some(ActionIntent {
+                  kind: "perform_job",
+                  utility: payout_utility - lateness_penalty,
+                  target: Some(job.location_xy),
+                  payload: Some(job.id.to_string()),
+              })
+          }
+      }
+
+  # ---------------------------------------------------------------------------
+  # File 2: Global Ledger Schema (SQL) — CRDB 2025-safe, no deprecated interleave
+  # Military-grade traits:
+  # - Multi-region enum
+  # - REGIONAL BY ROW locality
+  # - Strict idempotency via source_event_id UNIQUE
+  # - Foreign keys preserved with regional affinity
+  # ---------------------------------------------------------------------------
+  - path: "database/migrations/cockroach/global/001_ledger.sql"
+    description: "CockroachDB multi-region ledger with geo-partitioning, no interleaving."
+    content: |
+      -- Enable multi-region on database.
+      ALTER DATABASE metropolis SET PRIMARY REGION "eu-west-1";
+      ALTER DATABASE metropolis ADD REGION "us-east-1";
+      ALTER DATABASE metropolis ADD REGION "ap-southeast-1";
+
+      -- Ledger header (Odoo account.move)
+      CREATE TABLE IF NOT EXISTS account_move (
+          region_id crdb_internal_region NOT NULL DEFAULT gateway_region(),
+          id UUID NOT NULL DEFAULT gen_random_uuid(),
+          date DATE NOT NULL,
+          company_id INT8 NOT NULL,
+          currency STRING NOT NULL,
+          state STRING NOT NULL,
+          total_debit DECIMAL(20,4) NOT NULL DEFAULT 0,
+          total_credit DECIMAL(20,4) NOT NULL DEFAULT 0,
+          fx_rate_snapshot JSONB,
+          source_event_id UUID NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (region_id, id),
+          UNIQUE (region_id, source_event_id)
+      );
+      ALTER TABLE account_move SET LOCALITY REGIONAL BY ROW AS region_id;
+
+      -- Ledger lines (Odoo account.move.line)
+      CREATE TABLE IF NOT EXISTS account_move_line (
+          region_id crdb_internal_region NOT NULL,
+          move_id UUID NOT NULL,
+          line_id UUID NOT NULL DEFAULT gen_random_uuid(),
+          account_id INT8 NOT NULL,
+          partner_token STRING, -- tokenized regionally; no raw PII
+          debit DECIMAL(20,4) NOT NULL DEFAULT 0,
+          credit DECIMAL(20,4) NOT NULL DEFAULT 0,
+          analytic_tags STRING[],
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (region_id, move_id, line_id),
+          CONSTRAINT fk_move
+            FOREIGN KEY (region_id, move_id)
+            REFERENCES account_move (region_id, id)
+            ON DELETE CASCADE
+      );
+      ALTER TABLE account_move_line SET LOCALITY REGIONAL BY ROW AS region_id;
+
+      -- Performance indexes (region-scoped).
+      CREATE INDEX IF NOT EXISTS idx_move_date ON account_move (region_id, date);
+      CREATE INDEX IF NOT EXISTS idx_line_account ON account_move_line (region_id, account_id);
+
+  # ---------------------------------------------------------------------------
+  # File 3: AI-CEO Gym Adapter (Python) — federated council + Kafka + Temporal
+  # Military-grade traits:
+  # - Consumes regional Kafka topics
+  # - Enforces residency masks
+  # - Produces actions to Temporal workflows with idempotency
+  # - Supports federated learning updates
+  # ---------------------------------------------------------------------------
+  - path: "services/ai-player/gym_adapter.py"
+    description: "Gym environment binding telemetry/finance to the AI Council and dispatching actions via Temporal."
+    content: |
+      import asyncio
+      import gym
+      import numpy as np
+      from dataclasses import dataclass
+      from typing import Dict, Any, Tuple, Optional
+
+      from aiokafka import AIOKafkaConsumer
+      from temporalio.client import Client
+      from temporalio.common import RetryPolicy
+
+      from services.ai_player.features import FeatureStore
+      from services.ai_player.reward import RewardModel
+      from services.ai_player.policy.residency import ResidencyMask
+      from services.ai_player.council.federated import FederatedUpdateClient
+
+      @dataclass
+      class CouncilAction:
+          workflow: str
+          signal: str
+          payload: Dict[str, Any]
+          idempotency_key: str
+
+      class MetropolisEnv(gym.Env):
+          """
+          Region-scoped environment. One instance per region.
+          Observations are residency-masked and normalized locally.
+          Only DP-protected gradients leave region.
+          """
+          metadata = {"render.modes": []}
+
+          def __init__(self, region_id: str, kafka_bootstrap: str, temporal_addr: str):
+              super().__init__()
+              self.region_id = region_id
+              self.kafka_bootstrap = kafka_bootstrap
+              self.temporal_addr = temporal_addr
+
+              self.residency = ResidencyMask(region_id)
+              self.features = FeatureStore(region_id)
+              self.reward_model = RewardModel(region_id)
+              self.federated = FederatedUpdateClient(region_id)
+
+              self.temporal: Optional[Client] = None
+              self.consumer: Optional[AIOKafkaConsumer] = None
+
+              # Observation: normalized vector of regional KPIs + simulation stats.
+              self.observation_space = gym.spaces.Box(
+                  low=-5.0, high=5.0, shape=(64,), dtype=np.float32
+              )
+              # Action: continuous control (pricing, staffing, routing weights).
+              self.action_space = gym.spaces.Box(
+                  low=-1.0, high=1.0, shape=(12,), dtype=np.float32
+              )
+
+          async def _init_clients(self):
+              if self.temporal is None:
+                  self.temporal = await Client.connect(self.temporal_addr)
+
+              if self.consumer is None:
+                  self.consumer = AIOKafkaConsumer(
+                      f"{self.region_id}.telemetry.kpis",
+                      f"{self.region_id}.finance.kpis",
+                      f"{self.region_id}.simulation.kpis",
+                      bootstrap_servers=self.kafka_bootstrap,
+                      enable_auto_commit=True,
+                      auto_offset_reset="latest",
+                      group_id=f"ai-ceo-{self.region_id}"
+                  )
+                  await self.consumer.start()
+
+          async def reset(self, *, seed=None, options=None):
+              await self._init_clients()
+              obs = await self._gather_observation()
+              return obs, {}
+
+          async def step(self, action: np.ndarray):
+              await self._init_clients()
+
+              # 1) Map policy output -> Temporal signals (region-safe).
+              council_action = self._to_temporal_action(action)
+
+              # 2) Dispatch with retries + idempotency.
+              handle = self.temporal.get_workflow_handle(council_action.workflow)
+              await handle.signal(
+                  council_action.signal,
+                  council_action.payload,
+                  retry_policy=RetryPolicy(maximum_attempts=3)
+              )
+
+              # 3) Observe next state from Kafka.
+              obs = await self._gather_observation()
+
+              # 4) Reward (profit margin + SLA adherence + safety).
+              reward = self.reward_model.compute(obs)
+
+              terminated = False
+              truncated = False
+              info = {"region_id": self.region_id}
+
+              # 5) Periodically emit DP-protected gradients to global council.
+              if self.federated.should_emit_update():
+                  update_blob, epsilon = self.federated.build_dp_update()
+                  await self.federated.publish(update_blob, epsilon)
+
+              return obs, reward, terminated, truncated, info
+
+          async def _gather_observation(self) -> np.ndarray:
+              """
+              Pull latest KPI batch; apply residency mask and normalize.
+              """
+              msgs = []
+              async for msg in self.consumer:
+                  msgs.append(msg.value)
+                  if len(msgs) >= 3:
+                      break
+
+              raw = self.features.merge(msgs)
+              masked = self.residency.apply(raw)           # strip/blur PII
+              vec = self.features.vectorize(masked)       # 64-d float32
+              norm = self.features.normalize(vec)
+              return norm.astype(np.float32)
+
+          def _to_temporal_action(self, a: np.ndarray) -> CouncilAction:
+              """
+              a[0:4] pricing knobs, a[4:8] staffing knobs, a[8:12] routing knobs.
+              """
+              payload = {
+                  "pricing_delta": a[0:4].tolist(),
+                  "staffing_delta": a[4:8].tolist(),
+                  "routing_weights": a[8:12].tolist(),
+                  "region_id": self.region_id,
+              }
+              idem = self.features.make_idempotency_key(payload)
+
+              return CouncilAction(
+                  workflow=f"{self.region_id}-global-ops",
+                  signal="ApplyCouncilPolicy",
+                  payload=payload,
+                  idempotency_key=idem
+              )
